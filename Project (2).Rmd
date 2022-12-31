@@ -1,0 +1,266 @@
+---
+title: "DS Project"
+author: "Jennifer Matas"
+date: '2022-03-23'
+output: html_document
+---
+
+PH 1976 Group 4 Project
+
+setwd("C:/Users/OP7050/Box/School/Spring 2022/PH 1976/Project/Project data_2022")
+train <- read.csv("project_training set_p.csv") #n=528 in train
+test <- read.csv("project_test set_p.csv") #n=228 in test
+
+Exploratory analysis: training set has 528 rows and 756 columns. No missing variables
+```{r}
+#check for missing
+names(which(colSums(is.na(train)) > 0))
+```
+
+Check for correlation of variables. Note: because the dataset is so large, I will restrict to those with |0.80|. Tons of correlated features. 
+```{r}
+corrmatrix <- cor(train)
+corrmatrix[lower.tri(corrmatrix, diag = TRUE)] <- NA
+corrmatrix[abs(corrmatrix) < 0.80] <- NA # correlations below |.80| NA
+
+corrtable <- as.data.frame(as.table(corrmatrix))
+corrtable <- na.omit(corrtable)
+#sort 
+colnames(corrtable)
+sort.corrtable <- corrtable[order(corrtable$Freq),]
+
+head(sort.corrtable)
+tail(sort.corrtable)
+```
+
+Data preprocessing. Creating factor variables for gender and class and checking distribution of them.
+```{r}
+train$gender <- as.factor(train$gender)
+gender.count <- table(train$gender)
+gender.count
+barplot(gender.count, names.arg=c('Female','Male'), main='Distribution of gender', xlab='Gender', ylab='Count')
+#female=267;male=261
+
+train$class <- as.factor(train$class)
+pd.count <- table(train$class)
+pd.count
+barplot(pd.count, names.arg=c('No Disease','Parkinson'), main='Distribution of Parkinsons Disease', xlab='Disease status', ylab='Count')
+prop.table(table(train$class))
+#no=135; yes=393
+#Note: this is highly imbalanced. Parkinson's = 1 data will dominate the accuracy of the model when predicting class=1.
+```
+
+Feature selection: minimum redundancy-maximum relevance to select the top 50 features. Note: must convert factors to ordered factors for this package to work.
+```{r}
+library(mRMRe)
+
+#convert to ordered factors train data, prepping data for this package to work
+train <- subset(train, select=-c(id)) #deleting id 
+train[3:754] <- lapply(train[,c(3:754)], as.numeric) #converting all numeric starting from col 3 to 754 bc numPulses, numPeriodPulses are integers
+train.topfeat <- train #making a copy of train for mrmr package
+train.topfeat$class <- factor(train.topfeat$class, ordered=TRUE) #converting class and gender to ordered factors for this to work
+train.topfeat$gender <- factor(train.topfeat$gender, ordered=TRUE)
+
+#####feature selection######
+#top 50
+f.df2 <- mRMR.data(data=train.topfeat)
+top50feat2 <- mRMR.classic("mRMRe.Filter", data = f.df2, target_indices = 1, feature_count = 50)
+top50feats <- print(apply(solutions(top50feat2)[[1]], 2, function(x, y) { return(y[x]) }, y=featureNames(f.df2)))
+top50feats #printing top 50 features to see 
+features.use <- names(train.topfeat)[(names(train.topfeat) %in% top50feats)]
+train.50 <- train.topfeat[, features.use]
+train.50$class <- train.topfeat$class #creating a dataset with our top 50 features to use for future analysis
+```
+
+Splitting the original train (n=528) to subtrain and subtest datasets 70/30 split. All features= subtrain| Top 50= subtrain.50 --> will test both on subtest
+```{r}
+library(caret)
+
+set.seed(123)
+inTraining <- createDataPartition(train$class, p = .60, list = FALSE)
+subtrain <- train[ inTraining,]
+subtest  <- train[-inTraining,]
+
+#creating the subtrain.50 to include only our features of interest
+subtrain.50 <- subtrain[, features.use]
+subtrain.50$class <- subtrain$class
+
+#need levels to have classprobs = T in train control, class probs will not accept 0/1 and unordered factors?
+#subtrain$class <- factor(subtrain$class, ordered=TRUE)
+levels(subtrain$class) <- make.names(levels(factor(subtrain$class))) 
+table(subtrain$class) #checking X0 vs X1
+
+levels(subtest$class) <- make.names(levels(factor(subtrain$class))) 
+table(subtest$class) #checking X0 vs X1
+
+levels(subtrain.50$class) <- make.names(levels(factor(subtrain$class))) 
+table(subtrain.50$class) #checking X0 vs X1
+```
+
+ALL FEATURES ASSESSMENT: 
+ML strategies: SVM radial and linear, boosting, Random Forest, neural nets 
+```{r}
+#will use this for cross-validation of all MLs (except RF)
+train_control <- trainControl(method="repeatedcv", number=10, repeats=3, classProbs = TRUE, savePredictions = TRUE, summaryFunction = twoClassSummary) #need 2 class summary to use ROC metric
+
+#SVM- Radial
+set.seed(123)
+svmrad.all <- train(class ~., data = subtrain, method = "svmRadial", metric="ROC", trControl = train_control, preProcess = c("center","scale"),  tuneLength = 10)
+svmrad.pred.all <- predict(svmrad.all, newdata=subtest)
+CM.svmrad.all <- confusionMatrix(table(svmrad.pred.all, subtest$class)) 
+CM.svmrad.all
+
+#SVM- Linear
+set.seed(123)
+svmlin.all <- train(class ~., data = subtrain, method = "svmLinear", metric="ROC", trControl = train_control, preProcess = c("center","scale"),  tuneGrid = expand.grid(C = seq(0, 2, length = 20)))
+svmlin.pred.all <- predict(svmlin.all, newdata=subtest)
+CM.svmlin.all<- confusionMatrix(table(svmlin.pred.all, subtest$class)) 
+CM.svmlin.all
+
+#Boosting
+set.seed(123)
+boost.all <- train(class~., data=subtrain, method="gbm", metric="ROC", trControl=train_control, verbose=FALSE) #verbose=F avoids long printout in gbm
+boost.pred.all <- predict(boost.all, newdata=subtest)
+CM.boost.all <- confusionMatrix(table(boost.pred.all, subtest$class))
+CM.boost.all
+
+#Random Forest
+#Grid search to tune parameters
+set.seed(123)
+rf.traincontrol <- trainControl(method="repeatedcv", number=10, repeats=3, search="grid", classProbs = TRUE, savePredictions = TRUE, summaryFunction = twoClassSummary) #note: this uses a different traincntrl bc of search option
+x <- subtrain[,2:ncol(subtrain)] #making a vector with predictors of subtrain (all feats) only
+mtry <- sqrt(ncol(x)) 
+tunegrid <- expand.grid(.mtry=mtry)
+rf.all <- train(class~., data=subtrain, method = "rf", metric="ROC", importance=TRUE, preProcess = c("center", "scale"), trControl = rf.traincontrol, tuneGrid=tunegrid)
+rf.pred.all <- predict(rf.all, newdata=subtest)
+CM.rf.all <- confusionMatrix(table(rf.pred.all, subtest$class))
+CM.rf.all
+```
+
+TOP 50 FEATURES ASSESSMENT: 
+ML strategies: SVM radial and linear, boosting, Random Forest, neural nets 
+
+```{r}
+#will use this for cross-validation of all MLs (except RF)
+train_control <- trainControl(method="repeatedcv", number=10, repeats=3, classProbs = TRUE, savePredictions = TRUE, summaryFunction = twoClassSummary)  #need 2 class summary to use ROC metric
+
+#SVM- Radial
+set.seed(123)
+svmrad.50 <- train(class ~., data = subtrain.50, method = "svmRadial", metric="ROC", trControl = train_control, preProcess = c("center","scale"),  tuneLength = 10)
+svmrad.pred.50 <- predict(svmrad.50, newdata=subtest)
+CM.svmrad.50 <- confusionMatrix(table(svmrad.pred.50, subtest$class))
+CM.svmrad.50
+
+#SVM- Linear
+set.seed(123)
+svmlin.50 <- train(class ~., data = subtrain.50, method = "svmLinear", metric="ROC", trControl = train_control, preProcess = c("center","scale"),  tuneGrid = expand.grid(C = seq(0, 2, length = 20)))
+svmlin.pred.50 <- predict(svmlin.50, newdata=subtest)
+CM.svmlin.50 <- confusionMatrix(table(svmlin.pred.50, subtest$class)) 
+CM.svmlin.50
+
+#Boosting
+set.seed(123)
+boost.50 <- train(class~., data=subtrain.50, method="gbm", metric="ROC", trControl=train_control, verbose=FALSE) #verbose=F avoids long printout in gbm
+boost.pred.50 <- predict(boost.50, newdata=subtest)
+CM.boost.50 <- confusionMatrix(table(boost.pred.50, subtest$class))
+CM.boost.50
+
+#Random Forest
+#Grid search to tune parameters
+set.seed(123)
+rf.traincontrol <- trainControl(method="repeatedcv", number=10, repeats=3, search="grid", classProbs = TRUE, savePredictions = TRUE, summaryFunction =twoClassSummary) #note: this uses a different traincntrl bc of search option
+x.50 <- subtrain.50[,2:ncol(subtrain.50)] #making a vector with predictors of subtrain (top 50 feats) only
+mtry <- sqrt(ncol(x.50)) 
+tunegrid <- expand.grid(.mtry=mtry)
+rf.50 <- train(class~., data=subtrain.50, method = "rf", metric="ROC", importance=TRUE, preProcess = c("center", "scale"), trControl = rf.traincontrol, tuneGrid=tunegrid)
+rf.pred.50 <- predict(rf.50, newdata=subtest)
+CM.rf.50 <- confusionMatrix(table(rf.pred.50, subtest$class))
+CM.rf.50
+```
+
+CREATING TABLE FOR ACCURACY, SENSITIVITY, and SPECIFICTY METRICS FOR ALL FEATS AND TOP 50
+```{r}
+#SVM: Radial
+
+svm.rad.all.metrics <- round(cbind(Accuracy=CM.svmrad.all$overall[[1]], Sensitivity=CM.svmrad.all$byClass[[1]], Specificity=CM.svmrad.all$byClass[[2]]), digits=3)
+svm.rad.50.metrics <- round(cbind(Accuracy=CM.svmrad.50$overall[[1]], Sensitivity=CM.svmrad.50$byClass[[1]], Specificity=CM.svmrad.50$byClass[[2]]), digits=3)
+
+#SVM: Linear
+svm.lin.all.metrics <- round(cbind(Accuracy=CM.svmlin.all$overall[[1]], Sensitivity=CM.svmlin.all$byClass[[1]], Specificity=CM.svmlin.all$byClass[[2]]), digits=3)
+svm.lin.50.metrics <- round(cbind(Accuracy=CM.svmlin.50$overall[[1]], Sensitivity=CM.svmlin.50$byClass[[1]], Specificity=CM.svmlin.50$byClass[[2]]), digits=3)
+
+#Boosting
+boost.all.metrics <- round(cbind(Accuracy=CM.boost.all$overall[[1]], Sensitivity=CM.boost.all$byClass[[1]], Specificity=CM.boost.all$byClass[[2]]), digits=3)
+boost.50.metrics <- round(cbind(Accuracy=CM.boost.50$overall[[1]], Sensitivity=CM.boost.50$byClass[[1]], Specificity=CM.boost.50$byClass[[2]]), digits=3)
+
+#Random Forest
+rf.all.metrics <- round(cbind(Accuracy=CM.rf.all$overall[[1]], Sensitivity=CM.rf.all$byClass[[1]], Specificity=CM.rf.all$byClass[[2]]), digits=3)
+rf.50.metrics <- round(cbind(Accuracy=CM.rf.50$overall[[1]], Sensitivity=CM.rf.50$byClass[[1]], Specificity=CM.rf.50$byClass[[2]]), digits=3)
+
+summary4tbl <- rbind(svm.rad.all.metrics,svm.rad.50.metrics,svm.lin.all.metrics,svm.lin.50.metrics,boost.all.metrics,boost.50.metrics,rf.all.metrics,rf.50.metrics)
+rownames(summary4tbl) <- c('SVM Radial- All features','SVM Radial- Top 50 features','SVM Linear- All features','SVM Linear- Top 50 features', 'Boosting- All features','Boosting- Top 50 features', 'Random Forest- All features','Random Forest- Top 50 features')
+summary4tbl
+
+library(kableExtra)
+library(dplyr)
+summary4tbl %>%
+  kbl() %>%
+  kable_classic(full_width = F, html_font = "Calibi")
+```
+
+Selecting SVM Radial Top 50 as final predictive model because high accuracy and less discrepancy between sensitivity and specificity.
+```{r}
+#Can we address the class imbalance problem? Used this link as a reference: https://dpmartin42.github.io/posts/r/imbalanced-classes-part-1
+
+
+train_control <- trainControl(method="repeatedcv", number=10, repeats=3, classProbs = TRUE, savePredictions = TRUE, summaryFunction = twoClassSummary)
+
+# Create model weights (they sum to one)
+model_weights <- ifelse(subtrain.50$class == "X1", (1/table(subtrain.50$class)[1]) * 0.5, (1/table(subtrain.50$class)[2]) * 0.5)
+
+train_control$seeds <- svmrad.50$control$seeds
+
+# Build weighted model
+weighted_fit <- train(class ~ ., data = subtrain.50, method = "svmRadial", metric="ROC", verbose = FALSE, weights = model_weights, trControl = train_control)
+# Build down-sampled model
+train_control$sampling <- "down"
+down_fit <- train(class ~ ., data = subtrain.50, method = "svmRadial", metric="ROC", verbose = FALSE, trControl = train_control)
+# Build up-sampled model
+train_control$sampling <- "up"
+up_fit <- train(class ~ ., data = subtrain.50, method = "svmRadial", metric="ROC", verbose = FALSE, trControl = train_control)
+# Build smote model
+train_control$sampling <- "smote"
+smote_fit <- train(class ~ ., data = subtrain.50, method = "svmRadial", metric="ROC", verbose = FALSE, trControl = train_control)
+
+
+#AUC
+library(MLeval)
+res <- evalm(list(svmrad.50, weighted_fit,down_fit,up_fit,smote_fit),gnames=c('Original','Weighted','Down', 'Up','Smote'))
+```
+
+#Predicting on final test dataset
+```{r}
+svmrad50.predtest <- predict(svmrad.50, newdata=test)
+predictions <- svmrad50.predtest
+predictions <- ifelse(predictions=="X1",1,0)
+predictions
+
+test_final <- as.data.frame(cbind(test[,1], predictions))
+library(writexl)
+write_xlsx(test_final, "testfinal.xlsx")
+
+```
+
+check on actual test set 
+```{r}
+rt <- read.csv("project_test_set.csv") 
+rtpred <- predict(svmrad.50, newdata=rt)
+rtpred <- ifelse(rtpred=="X1",1,0)
+rtpred
+confusionMatrix(table(rtpred, rt$class.1))
+
+
+```
+
+
+
